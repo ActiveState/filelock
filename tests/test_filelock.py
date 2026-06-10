@@ -97,6 +97,42 @@ class BaseTest(object):
                 raise
         return None
 
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires os.symlink")
+    def test_symlinked_lock_file_does_not_truncate_target(self):
+        """
+        CVE-2025-68146: a symlink planted at the lock path must not be followed
+        and have its target truncated by the O_TRUNC open. However the lock
+        refuses (ELOOP / EEXIST / timeout), the victim file must be intact and
+        the lock must not be held.
+        """
+        victim = self.LOCK_PATH + ".victim"
+        link = self.LOCK_PATH + ".link"
+        for path in (victim, link):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        with open(victim, "w") as handle:
+            handle.write("DO-NOT-TRUNCATE")
+        try:
+            os.symlink(os.path.abspath(victim), link)
+            lock = self.LOCK_TYPE(link)
+            try:
+                lock.acquire(timeout=0.2)
+                lock.release()
+            except Exception:  # ELOOP / EEXIST / Timeout are all acceptable
+                pass
+            self.assertFalse(lock.is_locked)
+            with open(victim) as handle:
+                self.assertEqual(handle.read(), "DO-NOT-TRUNCATE")
+        finally:
+            for path in (link, victim):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        return None
+
     def test_simple(self):
         """
         Asserts that the lock is locked in a context statement and that the

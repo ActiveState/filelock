@@ -30,6 +30,7 @@ A platform independent file lock that supports the with-statement.
 # ------------------------------------------------
 import logging
 import os
+import sys
 import threading
 import time
 
@@ -322,6 +323,29 @@ class BaseFileLock(object):
 # ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
+def _is_reparse_point(path):
+    """Return True if *path* is a Windows reparse point (symlink/junction).
+
+    CVE-2025-68146: Windows has no ``O_NOFOLLOW``, so before opening the lock
+    file we refuse reparse points; otherwise an attacker-planted symlink could
+    be followed and its target truncated by ``O_TRUNC``.
+    """
+    import ctypes
+
+    FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+    INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+    if isinstance(path, bytes):
+        path = path.decode(sys.getfilesystemencoding())
+    get_attrs = ctypes.windll.kernel32.GetFileAttributesW
+    get_attrs.argtypes = [ctypes.c_wchar_p]
+    get_attrs.restype = ctypes.c_uint32
+    attrs = get_attrs(path)
+    if attrs == INVALID_FILE_ATTRIBUTES:
+        # Does not exist yet (or unreadable) -- os.open() will handle creation.
+        return False
+    return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 class WindowsFileLock(BaseFileLock):
     """
     Uses the :func:`msvcrt.locking` function to hard lock the lock file on
@@ -329,6 +353,12 @@ class WindowsFileLock(BaseFileLock):
     """
 
     def _acquire(self):
+        # CVE-2025-68146: refuse a reparse point (symlink/junction) at the lock
+        # path -- opening it with O_TRUNC could truncate the target file.
+        if _is_reparse_point(self._lock_file):
+            raise OSError(
+                "Refusing to use a reparse point as a lock file: %s"
+                % self._lock_file)
         open_mode = os.O_RDWR | os.O_CREAT | os.O_TRUNC
 
         try:
@@ -369,7 +399,13 @@ class UnixFileLock(BaseFileLock):
     """
 
     def _acquire(self):
+        # CVE-2025-68146: add O_NOFOLLOW so os.open() will not follow a symlink
+        # planted at the lock path (which, with O_TRUNC, would let an attacker
+        # truncate an arbitrary file). Guarded for platforms that lack it.
         open_mode = os.O_RDWR | os.O_CREAT | os.O_TRUNC
+        o_nofollow = getattr(os, "O_NOFOLLOW", None)
+        if o_nofollow is not None:
+            open_mode |= o_nofollow
         fd = os.open(self._lock_file, open_mode)
 
         try:
@@ -402,7 +438,12 @@ class SoftFileLock(BaseFileLock):
     """
 
     def _acquire(self):
+        # O_EXCL already refuses to follow/clobber an existing path; add
+        # O_NOFOLLOW too for consistency with the hard locks (CVE-2025-68146).
         open_mode = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_TRUNC
+        o_nofollow = getattr(os, "O_NOFOLLOW", None)
+        if o_nofollow is not None:
+            open_mode |= o_nofollow
         try:
             fd = os.open(self._lock_file, open_mode)
         except (IOError, OSError):

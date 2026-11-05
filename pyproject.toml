@@ -15,4 +15,3 @@ profile = "black"
 known_first_party = ["filelock", "tests"]
 
 [tool.setuptools_scm]
-write_to = "src/filelock/version.py"

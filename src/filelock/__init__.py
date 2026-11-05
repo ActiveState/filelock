@@ -359,7 +359,11 @@ class WindowsFileLock(BaseFileLock):
             raise OSError(
                 "Refusing to use a reparse point as a lock file: %s"
                 % self._lock_file)
-        open_mode = os.O_RDWR | os.O_CREAT | os.O_TRUNC
+        # CVE-2026-112909: no O_TRUNC. A file renamed or hard-linked onto the
+        # lock path is indistinguishable from a lock file and must not be
+        # emptied; the lock never stores anything in the file, so nothing
+        # needs truncating.
+        open_mode = os.O_RDWR | os.O_CREAT
 
         try:
             fd = os.open(self._lock_file, open_mode)
@@ -402,7 +406,12 @@ class UnixFileLock(BaseFileLock):
         # CVE-2025-68146: add O_NOFOLLOW so os.open() will not follow a symlink
         # planted at the lock path (which, with O_TRUNC, would let an attacker
         # truncate an arbitrary file). Guarded for platforms that lack it.
-        open_mode = os.O_RDWR | os.O_CREAT | os.O_TRUNC
+        # CVE-2026-112909: no O_TRUNC either. O_NOFOLLOW does not catch a
+        # regular file another user renames or hard-links onto the lock path,
+        # and O_TRUNC emptied it (on every attempt, even one that then lost
+        # the flock). The lock never stores anything in the file, so the file
+        # is locked as found.
+        open_mode = os.O_RDWR | os.O_CREAT
         o_nofollow = getattr(os, "O_NOFOLLOW", None)
         if o_nofollow is not None:
             open_mode |= o_nofollow

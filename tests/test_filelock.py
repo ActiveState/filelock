@@ -133,6 +133,66 @@ class BaseTest(object):
                     pass
         return None
 
+    def _assert_existing_file_at_lock_path_is_not_truncated(self, place):
+        """
+        CVE-2026-112909 / GHSA-69hj-f68j-2879: a regular file that another user
+        renames or hard-links onto the lock path is indistinguishable from a
+        lock file, so acquiring the lock must leave its content alone. ``place``
+        puts the victim file at the lock path (rename or hard link).
+        """
+        victim = self.LOCK_PATH + ".victim"
+        for path in (victim, self.LOCK_PATH):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        with open(victim, "w") as handle:
+            handle.write("DO-NOT-TRUNCATE")
+        try:
+            place(victim, self.LOCK_PATH)
+            lock = self.LOCK_TYPE(self.LOCK_PATH)
+            try:
+                lock.acquire(timeout=0.2)
+                lock.release()
+            except filelock.Timeout:  # SoftFileLock refuses an existing path
+                pass
+            self.assertFalse(lock.is_locked)
+            with open(self.LOCK_PATH) as handle:
+                self.assertEqual(handle.read(), "DO-NOT-TRUNCATE")
+        finally:
+            try:
+                os.remove(victim)
+            except OSError:
+                pass
+        return None
+
+    def test_renamed_file_at_lock_path_is_not_truncated(self):
+        """CVE-2026-112909: rename route."""
+        self._assert_existing_file_at_lock_path_is_not_truncated(os.rename)
+        return None
+
+    @unittest.skipUnless(hasattr(os, "link"), "requires os.link")
+    def test_hard_linked_file_at_lock_path_is_not_truncated(self):
+        """CVE-2026-112909: hard-link route; the second name must keep its content too."""
+        self._assert_existing_file_at_lock_path_is_not_truncated(os.link)
+        return None
+
+    def test_contender_does_not_truncate_holders_lock_file(self):
+        """
+        CVE-2026-112909: a second acquire attempt (here a contender that loses)
+        must not empty the lock file either, so whatever a holder keeps in it
+        survives.
+        """
+        holder = self.LOCK_TYPE(self.LOCK_PATH)
+        contender = self.LOCK_TYPE(self.LOCK_PATH)
+        with holder:
+            with open(self.LOCK_PATH, "a") as handle:
+                handle.write("HOLDER")
+            self.assertRaises(filelock.Timeout, contender.acquire, timeout=0.1)
+            with open(self.LOCK_PATH) as handle:
+                self.assertEqual(handle.read(), "HOLDER")
+        return None
+
     def test_simple(self):
         """
         Asserts that the lock is locked in a context statement and that the
